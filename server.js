@@ -153,7 +153,19 @@ wss.on('connection', (ws) => {
   let role = null;
   let room = null;
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
+    // Binary messages = video chunks, forward directly
+    if (isBinary) {
+      if (room && rooms.has(room)) {
+        const r = rooms.get(room);
+        const target = role === 'streamer' ? r.viewer : r.streamer;
+        if (target && target.readyState === 1) {
+          target.send(raw, { binary: true });
+        }
+      }
+      return;
+    }
+
     try {
       const msg = JSON.parse(raw.toString());
 
