@@ -175,17 +175,26 @@ wss.on('connection', (ws) => {
         room = msg.room;
 
         if (!rooms.has(room)) {
-          rooms.set(room, { streamer: null, viewer: null });
+          rooms.set(room, { streamer: null, viewer: null, streamerInfo: null });
         }
         const r = rooms.get(room);
         r[role] = ws;
 
-        console.log(`[relay] ${role} joined room "${room}"`);
+        // Save streamer's connection info for viewers
+        if (role === 'streamer' && msg.localIPs) {
+          r.streamerInfo = { localIPs: msg.localIPs, streamPort: msg.streamPort };
+        }
+
+        console.log(`[relay] ${role} joined room "${room}"${msg.localIPs ? ' IPs: ' + msg.localIPs.join(',') : ''}`);
 
         // Notify the other side if both are connected
         if (r.streamer && r.viewer) {
           r.streamer.send(JSON.stringify({ type: 'peer-joined', role: 'viewer' }));
-          r.viewer.send(JSON.stringify({ type: 'peer-joined', role: 'streamer' }));
+          // Send streamer's LAN info to viewer so it can connect directly
+          r.viewer.send(JSON.stringify({
+            type: 'peer-joined', role: 'streamer',
+            ...(r.streamerInfo || {})
+          }));
         }
         return;
       }
