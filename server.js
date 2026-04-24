@@ -146,21 +146,34 @@ const server = http.createServer((req, res) => {
 // ========================
 const wss = new WebSocketServer({ server });
 
-// Rooms: roomCode -> { streamer: ws, viewer: ws }
+// Rooms: roomCode -> { peers: Map<role, ws>, meta: {} }
+// Legacy rooms (streamer/viewer) use the same structure
 const rooms = new Map();
+
+function getRoom(roomCode) {
+  if (!rooms.has(roomCode)) {
+    rooms.set(roomCode, { peers: new Map(), meta: {} });
+  }
+  return rooms.get(roomCode);
+}
+
+function isRoomEmpty(r) {
+  return r.peers.size === 0;
+}
 
 wss.on('connection', (ws) => {
   let role = null;
   let room = null;
 
   ws.on('message', (raw, isBinary) => {
-    // Binary messages = video chunks, forward directly
+    // Binary messages = forward to all other peers in the room
     if (isBinary) {
       if (room && rooms.has(room)) {
         const r = rooms.get(room);
-        const target = role === 'streamer' ? r.viewer : r.streamer;
-        if (target && target.readyState === 1) {
-          target.send(raw, { binary: true });
+        for (const [peerRole, peerWs] of r.peers) {
+          if (peerRole !== role && peerWs.readyState === 1) {
+            peerWs.send(raw, { binary: true });
+          }
         }
       }
       return;
@@ -169,42 +182,44 @@ wss.on('connection', (ws) => {
     try {
       const msg = JSON.parse(raw.toString());
 
-      // Join a room as streamer or viewer
+      // Join a room with any role
       if (msg.type === 'join') {
-        role = msg.role; // 'streamer' or 'viewer'
+        role = msg.role;
         room = msg.room;
 
-        if (!rooms.has(room)) {
-          rooms.set(room, { streamer: null, viewer: null, streamerInfo: null });
-        }
-        const r = rooms.get(room);
-        r[role] = ws;
+        const r = getRoom(room);
+        r.peers.set(role, ws);
 
-        // Save streamer's connection info for viewers
-        if (role === 'streamer' && msg.localIPs) {
-          r.streamerInfo = { localIPs: msg.localIPs, streamPort: msg.streamPort };
+        // Save connection info in room meta
+        if (msg.localIPs) {
+          r.meta[role + 'Info'] = { localIPs: msg.localIPs, streamPort: msg.streamPort };
         }
 
         console.log(`[relay] ${role} joined room "${room}"${msg.localIPs ? ' IPs: ' + msg.localIPs.join(',') : ''}`);
 
-        // Notify the other side if both are connected
-        if (r.streamer && r.viewer) {
-          r.streamer.send(JSON.stringify({ type: 'peer-joined', role: 'viewer' }));
-          // Send streamer's LAN info to viewer so it can connect directly
-          r.viewer.send(JSON.stringify({
-            type: 'peer-joined', role: 'streamer',
-            ...(r.streamerInfo || {})
-          }));
+        // Notify all other peers about the new joiner
+        for (const [peerRole, peerWs] of r.peers) {
+          if (peerRole !== role && peerWs.readyState === 1) {
+            peerWs.send(JSON.stringify({ type: 'peer-joined', role, ...(r.meta[role + 'Info'] || {}) }));
+          }
+        }
+
+        // Notify the new joiner about all existing peers
+        for (const [peerRole, peerWs] of r.peers) {
+          if (peerRole !== role && peerWs.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'peer-joined', role: peerRole, ...(r.meta[peerRole + 'Info'] || {}) }));
+          }
         }
         return;
       }
 
-      // Forward all other messages to the other peer
+      // Forward all other messages to all other peers in the room
       if (room && rooms.has(room)) {
         const r = rooms.get(room);
-        const target = role === 'streamer' ? r.viewer : r.streamer;
-        if (target && target.readyState === 1) {
-          target.send(raw.toString());
+        for (const [peerRole, peerWs] of r.peers) {
+          if (peerRole !== role && peerWs.readyState === 1) {
+            peerWs.send(raw.toString());
+          }
         }
       }
     } catch (e) {
@@ -215,16 +230,17 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (room && rooms.has(room)) {
       const r = rooms.get(room);
-      if (r[role] === ws) {
-        r[role] = null;
-        // Notify other peer
-        const other = role === 'streamer' ? r.viewer : r.streamer;
-        if (other && other.readyState === 1) {
-          other.send(JSON.stringify({ type: 'peer-left', role }));
+      if (r.peers.get(role) === ws) {
+        r.peers.delete(role);
+        // Notify all remaining peers
+        for (const [peerRole, peerWs] of r.peers) {
+          if (peerWs.readyState === 1) {
+            peerWs.send(JSON.stringify({ type: 'peer-left', role }));
+          }
         }
       }
       // Clean up empty rooms
-      if (!r.streamer && !r.viewer) {
+      if (isRoomEmpty(r)) {
         rooms.delete(room);
       }
     }
