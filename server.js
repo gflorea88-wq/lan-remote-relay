@@ -192,7 +192,7 @@ wss.on('connection', (ws) => {
 
         // Save connection info in room meta
         if (msg.localIPs) {
-          r.meta[role + 'Info'] = { localIPs: msg.localIPs, streamPort: msg.streamPort };
+          r.meta[role + 'Info'] = { localIPs: msg.localIPs, streamPort: msg.streamPort, tcpStreamPort: msg.tcpStreamPort };
         }
 
         console.log(`[relay] ${role} joined room "${room}"${msg.localIPs ? ' IPs: ' + msg.localIPs.join(',') : ''}`);
